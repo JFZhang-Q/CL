@@ -19,6 +19,24 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
+# 是否显示进度条
+SHOW_PROGRESS=false
+
+# 单行进度条函数
+show_progress() {
+    local current=$1
+    local total=$2
+    local width=40
+    local percentage=$((current * 100 / total))
+    local filled=$((width * current / total))
+    local empty=$((width - filled))
+
+    printf "\r${GREEN}[${NC}"
+    printf "${GREEN}%${filled}s${NC}" "" | tr ' ' '='
+    printf "${GREEN}%${empty}s${NC}" "" | tr ' ' '-'
+    printf "${GREEN}]${NC} %3d%% (%d/%d)" "$percentage" "$current" "$total"
+}
+
 # 默认参数
 TARGET_DIR=""
 EXCLUDE_DIRS=""
@@ -35,12 +53,18 @@ while [[ $# -gt 0 ]]; do
             FILE_TYPES="$2"
             shift 2
             ;;
+        -p|--progress)
+            SHOW_PROGRESS=true
+            shift
+            ;;
         -h|--help)
             echo "用法：$0 [目录路径] [-e 排除目录列表] [-t 文件类型列表]"
             echo ""
             echo "选项:"
             echo "  -e, --exclude DIRS   排除指定的目录（逗号分隔，使用绝对路径）"
             echo "  -t, --types TYPES    统计的文件类型（逗号分隔，不含点）"
+            echo "  -p, --progress      显示进度条"
+            echo "  -v, --version        显示版本信息"
             echo "  -h, --help           显示帮助信息"
             echo ""
             echo "注意：排除的目录必须是目标目录的子目录"
@@ -51,6 +75,11 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 . -t sh,py,js                      # 统计 shell/python/javascript"
             echo "  $0 /project -t java,kotlin,gradle     # Java/Kotlin 项目"
             echo "  $0 /project -t c,cpp,h,hpp            # C/C++ 项目"
+            exit 0
+            ;;
+        -v|--version)
+            echo "代码行数统计工具 v1.0.0"
+            echo "功能：统计指定目录下代码文件的行数（不包括空行）"
             exit 0
             ;;
         *)
@@ -80,6 +109,7 @@ if [ -z "$TARGET_DIR" ]; then
     echo "  $0 /path/to/dir                # 统计指定目录"
     echo "  $0 . -t py                     # 只统计 Python 文件"
     echo "  $0 . -e ./venv                 # 排除 venv 目录"
+    echo "  $0 . -p                       # 显示进度条"
     echo ""
     echo "使用 '$0 --help' 查看完整帮助"
     exit 0
@@ -146,7 +176,6 @@ if [ -n "$EXCLUDE_DIRS" ]; then
         fi
         
         # 验证排除目录是否为目标目录的子目录
-        # 方法：检查 exclude_abs 是否以 TARGET_DIR_ABS 开头
         case "$exclude_abs" in
             "$TARGET_DIR_ABS"|"$TARGET_DIR_ABS"/*)
                 # 是目标目录本身或其子目录，合法
@@ -161,11 +190,7 @@ if [ -n "$EXCLUDE_DIRS" ]; then
                 ;;
         esac
         
-        # 显示排除信息（调试用）
-        echo -e "${BLUE}[DEBUG]${NC} 将排除：$exclude_abs"
-        
         # 构建排除参数（正确的 find -prune 逻辑）
-        # 结构：-path 'exclude1' -prune -o -path 'exclude2' -prune -o ... -o -type f \( pattern \) -print0
         if [ -z "$FIND_EXCLUDE_ARGS" ]; then
             FIND_EXCLUDE_ARGS="\( -path '$exclude_abs' -prune \)"
         else
@@ -196,16 +221,15 @@ temp_file=$(mktemp)
 # 构建并执行 find 命令
 if [ -n "$FIND_EXCLUDE_ARGS" ]; then
     # 使用 eval 来处理动态构建的排除参数
-    # 完整的 find 命令结构：find PATH \( -path 'exclude1' -prune \) -o \( -path 'exclude2' -prune \) -o ! -path 'script' -type f -name '*.ext' -print0
     FIND_CMD="find \"$TARGET_DIR_ABS\" $FIND_EXCLUDE_ARGS -o ! -path '$SCRIPT_PATH' -type f \\( $FILE_PATTERN \\) -print0 2>/dev/null"
     
-    # 调试输出（可选）
-    if [ "${DEBUG:-0}" = "1" ]; then
-        echo -e "${YELLOW}[DEBUG]${NC} FIND 命令：$FIND_CMD" >&2
-        echo -e "${YELLOW}[DEBUG]${NC} 执行测试..." >&2
-        # 先测试找到的文件数量
-        test_count=$(eval "$FIND_CMD" | grep -c ".")
-        echo -e "${YELLOW}[DEBUG]${NC} 找到 $test_count 个文件" >&2
+    # 先统计总文件数
+    total_files=$(eval "$FIND_CMD" | grep -c ".")
+    
+    # 如果指定了 -p 选项，显示进度条
+    if [ "$SHOW_PROGRESS" = true ]; then
+        echo -e "${BLUE}正在统计 $total_files 个文件...${NC}"
+        processed=0
     fi
     
     eval "$FIND_CMD" | sort -z | \
@@ -216,13 +240,28 @@ if [ -n "$FIND_EXCLUDE_ARGS" ]; then
                 echo "$lines|$file" >> "$temp_file"
             fi
         fi
+        # 更新进度条
+        if [ "$SHOW_PROGRESS" = true ]; then
+            processed=$((processed + 1))
+            show_progress $processed $total_files
+        fi
     done
+    
+    # 换行并清除进度条
+    if [ "$SHOW_PROGRESS" = true ]; then
+        echo ""
+    fi
 else
     # 没有排除目录时的简单查找（但仍需排除脚本自身）
     FIND_CMD="find \"$TARGET_DIR_ABS\" ! -path '$SCRIPT_PATH' -type f \\( $FILE_PATTERN \\) -print0 2>/dev/null"
     
-    if [ "${DEBUG:-0}" = "1" ]; then
-        echo -e "${YELLOW}[DEBUG]${NC} FIND 命令：$FIND_CMD" >&2
+    # 先统计总文件数
+    total_files=$(eval "$FIND_CMD" | grep -c ".")
+    
+    # 如果指定了 -p 选项，显示进度条
+    if [ "$SHOW_PROGRESS" = true ]; then
+        echo -e "${BLUE}正在统计 $total_files 个文件...${NC}"
+        processed=0
     fi
     
     eval "$FIND_CMD" | sort -z | \
@@ -233,7 +272,17 @@ else
                 echo "$lines|$file" >> "$temp_file"
             fi
         fi
+        # 更新进度条
+        if [ "$SHOW_PROGRESS" = true ]; then
+            processed=$((processed + 1))
+            show_progress $processed $total_files
+        fi
     done
+    
+    # 换行并清除进度条
+    if [ "$SHOW_PROGRESS" = true ]; then
+        echo ""
+    fi
 fi
 
 # 检查是否找到文件
@@ -272,6 +321,7 @@ echo -e "${GREEN}========================================${NC}"
 echo "文件总数：$file_count"
 echo -e "${BLUE}总行数：${GREEN}$total_lines${NC}"
 echo "========================================"
+echo "代码统计工具 v1.0.0"
 
 # 清理临时文件
 rm -f "$temp_file"
